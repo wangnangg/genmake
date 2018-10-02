@@ -1,0 +1,22 @@
+cpp_compiler?=gcc
+linker?=gcc
+config?=debug
+build_dir:=build/${config}
+
+compile_flags:= -Isrc -std=c++17 -Wall -Werror
+link_flags:= -lstdc++ -lm -pthread
+
+ifeq ($(config), release)
+  compile_flags += -g -O3 -DNDEBUG
+  linke_flags += -g -O3 -DNDEBUG
+else
+	ifeq ($(config), debug)
+  		compile_flags += -g
+  		linke_flags += -g
+	else
+$(error Unknown config: $(config))
+	endif
+endif
+
+
+
