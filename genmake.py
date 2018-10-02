@@ -45,6 +45,24 @@ def filename_transform(f, prefix=("", ""), postfix=("", "")):
         return list(map(lambda x: filename_transform(x, prefix, postfix), f))
 
 
+def listify(maybe_list):
+    if isinstance(maybe_list, list):
+        return maybe_list
+    else:
+        return [maybe_list]
+
+
+def change_ext(f, ext):
+    def ext(fname):
+        b, e = os.path.splitext(fname)
+        return f + ext
+
+    if isinstance(f, str):
+        return ext(f)
+    else:
+        return list(map(ext, f))
+
+
 def list2str(li):
     if isinstance(li, str):
         return li + ' '
@@ -66,12 +84,12 @@ class GenMake:
     def include(self, files):
         self.out.write(f"include {list2str(files)}\n\n")
 
-    def build_path(self, files):
+    def build_path(self, files, *, new_ext=None):
         def bpath(fname):
-            if os.path.dirname(fname) == '':
-                return self.build_dir + "/" + fname
-            else:
-                return fname
+            if new_ext:
+                b, e = os.path.splitext(fname)
+                fname = b + new_ext
+            return self.build_dir + "/" + fname
 
         if isinstance(files, str):
             return bpath(files)
@@ -81,46 +99,65 @@ class GenMake:
     def optional_include(self, files):
         self.out.write(f"-include {list2str(files)}\n\n")
 
+    def __mkdir(self, obj_dir):
+        if obj_dir in self.dir_targets:
+            return
+        self.dir_targets.add(obj_dir)
+
+        self.out.write(f"{obj_dir}:\n")
+        self.out.write(f"\tmkdir -p {obj_dir}\n\n")
+
+    def __compile_cpp(self, obj, src, compile_flags, compiler):
+        if obj in self.file_targets:
+            return
+        self.file_targets.add(obj)
+
+        obj_dir = os.path.dirname(obj)
+        self.out.write(f"{obj}: {src} | {obj_dir}\n")
+        #MMD: only user header, no system header
+        #MP: ignore non-exist headers
+        self.out.write(
+            f"\t{compiler} {compile_flags} -MMD -MP -c {src} -o {obj}\n\n")
+        dep = filename_transform(obj, postfix=(".o", ".d"))
+        self.optional_include(dep)
+        self.file_byprods.add(dep)
+
+        self.__mkdir(obj_dir)
+
+    def __link_cpp(self, target, obj_files, link_flags, linker):
+        if target in self.file_targets:
+            return
+        target_dir = os.path.dirname(target)
+        self.out.write(f"{target}: {list2str(obj_files)} | {target_dir} \n")
+        self.out.write(
+            f"\t{linker} {list2str(obj_files)} {link_flags} -o {target}\n\n")
+        self.file_targets.add(target)
+
+        self.__mkdir(target_dir)
+
+    def compile_cpp(self, src_files, compile_flags,
+                    compiler="${cpp_compiler}"):
+        src_files = listify(src_files)
+        obj_files = self.build_path(src_files, new_ext=".o")
+        for src, obj in zip(src_files, obj_files):
+            self.__compile_cpp(obj, src, compile_flags, compiler)
+
+        return obj_files
+
+    def link_cpp(self, target, obj_files, link_flags, linker="${linker}"):
+        target = self.build_path(target)
+        self.__link_cpp(target, obj_files, link_flags, linker)
+        return target
+
     def build_cpp(self,
                   target,
                   src_files,
                   compile_flags,
                   link_flags,
-                  *,
                   compiler="${cpp_compiler}",
-                  linker="${linker}",
-                  cpp_ext=".cpp"):
-        obj_files = filename_transform(
-            src_files,
-            prefix=("", self.build_dir + "/"),
-            postfix=(cpp_ext, ".o"))
-        for src, obj in zip(src_files, obj_files):
-            if obj in self.file_targets:
-                continue
-            self.file_targets.add(obj)
-
-            obj_dir = os.path.dirname(obj)
-            self.out.write(f"{obj}: {src} | {obj_dir}\n")
-            #MMD: only user header, no system header
-            #MP: ignore non-exist headers
-            self.out.write(
-                f"\t{compiler} {compile_flags} -MMD -MP -c {src} -o {obj}\n\n")
-            dep = filename_transform(obj, postfix=(".o", ".d"))
-            self.optional_include(dep)
-            self.file_byprods.add(dep)
-
-            if obj_dir in self.dir_targets:
-                continue
-            self.dir_targets.add(obj_dir)
-
-            self.out.write(f"{obj_dir}:\n")
-            self.out.write(f"\tmkdir -p {obj_dir}\n\n")
-
-        target = self.build_path(target)
-        self.out.write(f"{target}: {list2str(obj_files)}\n")
-        self.out.write(
-            f"\t{linker} {list2str(obj_files)} {link_flags} -o {target}\n\n")
-        self.file_targets.add(target)
+                  linker="${linker}"):
+        obj_files = self.compile_cpp(src_files, compile_flags, compiler)
+        return self.link_cpp(target, obj_files, link_flags, linker), obj_files
 
     def aggregate(self, target, sources):
         sources = self.build_path(sources)
@@ -145,9 +182,19 @@ cpp_link_flags = "${link_flags}"
 
 g = GenMake("${build_dir}")
 g.include("makefile.in")
-g.aggregate("all", "test")
+g.aggregate("all", ["main", "utest"])
 
-src_files = find_files_ext("src", ".cpp")
-g.build_cpp("test", src_files, cpp_compile_flags, cpp_link_flags)
+src = find_files_ext("src", ".cpp")
+main, obj = g.build_cpp("main", src, cpp_compile_flags, cpp_link_flags)
+
+gtest_src = "googletest/googletest/src/gtest-all.cc"
+gtest_obj = g.compile_cpp(gtest_src, "${gtest_compile_flags}")
+
+utest_src = find_files_ext("test", ".cpp")
+utest_obj = g.compile_cpp(utest_src, "${utest_compile_flags}")
+
+obj_nomain = list(filter(lambda f: os.path.basename(f) != "main.o", obj))
+g.link_cpp("utest", gtest_obj + utest_obj + obj_nomain, "${utest_link_flags}")
+
 g.clean()
 g.dump()
